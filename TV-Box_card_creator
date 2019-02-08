@@ -1,0 +1,180 @@
+#!/bin/sh
+############################################################################################
+# TV-Box SD-Card creator                                                                   #
+# This tool create a SD-Card for upgrade of TV-Box full automaticly                        #
+#                                                                                          #
+# Copyright (c) 2016 Alexander S. <alexandervai{at}gmx{dot}de>                             #
+#                                                                                          #
+# Permission to use, copy, modify, and distribute this software for any                    #
+# purpose with or without fee is hereby granted, provided that the above                   #
+# copyright notice and this permission notice appear in all copies.                        #
+#                                                                                          #
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES                 #
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF                         #
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR                  #
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES                   #
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN                    #
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF                  #
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.                           #
+#                                                                                          #
+# $Id: TV-Box_card_creator 110 2018-12-30 13:32:00Z alex $                                 #
+############################################################################################
+
+prep()
+{
+	(( EUID != 0 )) && exec sudo -- "./$0" "./$@"
+	if [ $EUID -ne 0 ]; then
+	  echo "You must have a root permissions" 2>&1
+	  exit 1
+	fi
+
+	if [ ! -d PUT_THE_IMAGE_FILE_HERE ]; then
+		mkdir PUT_THE_IMAGE_FILE_HERE
+		chmod -R 777 PUT_THE_IMAGE_FILE_HERE
+	fi
+
+	if [ -d extract ]; then
+	  find ./extract -type f ! -name 'aml-upgrade-package-extract' -delete
+	else
+		mkdir extract
+		chmod -R 777 extract
+	fi
+
+	if [ ! -f extract/aml-upgrade-package-extract ]; then
+		cat > "extract/aml-upgrade-package-extract.c" << EOF
+#include <errno.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <arpa/inet.h>
+
+uint32_t convert(uint8_t *test, uint64_t loc) {
+  return ntohl((test[loc] << 24) | (test[loc+1] << 16) | (test[loc+2] << 8) | test[loc+3]);
+}
+
+void main (int argc, char **argv) {
+  FILE *fileptr;
+  uint8_t *buffer;
+  long filelen;
+
+  FILE *f;
+  char *filename;
+  uint64_t record;
+  uint64_t record_loc;
+  uint64_t file_loc;
+  uint64_t file_size;
+
+  if (argc <= 1) {
+    printf("Usage: %s [firmware-file-name]\n", argv[0]);
+    exit (0);
+  }
+
+  fileptr = fopen(argv[1], "rb");
+  fseek(fileptr, 0, SEEK_END);
+  filelen = ftell(fileptr);
+  rewind(fileptr);
+
+  buffer = (uint8_t *)malloc((filelen+1)*sizeof(uint8_t));
+  fread(buffer, filelen, 1, fileptr);
+  fclose(fileptr);
+
+  for (record = 0; record < (uint8_t)buffer[0x18]; record = record + 1){
+    record_loc = 0x40 + (record * 0x240);
+
+    filename = (malloc(32));
+    sprintf(filename,"%s.%s",(char *)&buffer[record_loc+0x120], (char *)&buffer[record_loc+0x20]);
+
+    file_loc = convert(buffer,record_loc+0x10);
+    file_size = convert(buffer,record_loc+0x18);
+
+    f = fopen(filename, "wb");
+    if (f == NULL) {
+     printf("ERROR: could not open output\n");
+     printf("the error was: %s\n",strerror(errno));
+     free(filename);
+     continue;
+    }
+    fwrite(&(buffer[file_loc]), sizeof(uint8_t), (size_t)file_size, f);
+    fclose(f);
+    free(filename);
+  }
+  free(buffer);
+}
+EOF
+	gcc extract/aml-upgrade-package-extract.c -o extract/aml-upgrade-package-extract
+	rm extract/aml-upgrade-package-extract.c
+	fi
+
+#	if [ ! -z "$(ls -A ./PUT_THE_IMAGE_FILE_HERE)" ]; then
+#		find ./PUT_THE_IMAGE_FILE_HERE -type f -not -name '*.img' -not -name '*.IMG' -delete
+#	fi
+
+	if [ ! "$(find PUT_THE_IMAGE_FILE_HERE -name '*.img' -o -name '*.IMG')" ]; then
+		echo "Please put your image file in to directory PUT_THE_IMAGE_FILE_HERE and try again."
+		exit 0
+	elif [ "$(find PUT_THE_IMAGE_FILE_HERE -name '*.img' -o -name '*.IMG' | wc -l)" -gt 1 ]; then
+		until [ $(find PUT_THE_IMAGE_FILE_HERE -name '*.img' -o -name '*.IMG' | awk -F/ '{print $NF}' | nl -w2 | sed 's/^ //' | grep -o "$flash_img") ]
+		do
+			read -r -p "Please choose a image file by a number
+$(find PUT_THE_IMAGE_FILE_HERE -name '*.img' -o -name '*.IMG' | awk -F/ '{print $NF}' | nl -w2 | sed 's/^ //')
+Enter the number here: " flash_img
+			flash_img=$(find PUT_THE_IMAGE_FILE_HERE -name '*.img' -o -name '*.IMG' | awk -F/ '{print $NF}' | nl -w2 | sed 's/^ //' | grep "^$flash_img[[:space:]]" | grep "^$flash_img[[:space:]]" | sed "s/$flash_img	//")
+		done
+	elif [ "$(find PUT_THE_IMAGE_FILE_HERE -name '*.img' -o -name '*.IMG' | wc -l)" -eq 1 ]; then
+		flash_img="$(find PUT_THE_IMAGE_FILE_HERE -name '*.img' -o -name '*.IMG' | awk -F/ '{print $NF}')"
+	else
+		echo "Something went wrong!"
+		exit 1
+	fi
+
+	ln PUT_THE_IMAGE_FILE_HERE/$flash_img extract
+	cd extract
+	echo "Please wait while extraction..."
+	./aml-upgrade-package-extract $flash_img
+	chmod -R 777 extract
+
+	until [ $(lsblk | sed "1 d" | nl -w2 | sed 's/^ //' | grep -o "$storage") ]
+	do
+		read -r -p "Choose a storage (SD-Card or USB Flash) by the number
+$(lsblk | sed '1 d' | nl -w2 | sed 's/^ //')
+Enter the number here: " storage
+	done
+
+	stor_name=$(lsblk | sed "1 d" | nl -w2 | sed 's/^ //' | grep "^$storage[[:space:]]" | awk '{print $2}' | sed 's/─//; s/└//')
+	stor_mp=$(lsblk | sed "1 d" | nl -w2 | sed 's/^ //' | grep "^$storage[[:space:]]" | awk '{print $NF}')
+}
+
+flash_storage()
+{
+	read -r -p "WATCH OUT!!!
+Your storage /dev/$stor_name is being formatted. All data will be lost irrevocably.
+Sure you want to continue? [y/n]: " warning
+
+	case $warning in
+		y|Y|yes|YES|j|J|ja|JA)
+			umount /dev/$stor_name
+			mkfs.fat -F 32 -I /dev/$stor_name
+			dd if=aml_sdc_burn.UBOOT of=/dev/$stor_name bs=1 count=442
+			dd if=aml_sdc_burn.UBOOT of=/dev/$stor_name seek=1 skip=1 bs=512
+			mkdir $stor_mp
+			mount /dev/$stor_name $stor_mp
+			cp aml_sdc_burn.ini $stor_mp
+			cp aml_sdc_burn.UBOOT $stor_mp/aml_sdc_burn.bin
+			cp *.IMG *.img $stor_mp/aml_upgrade_package.img
+			umount /dev/$stor_name
+			rm -r $stor_mp
+			echo "============================================================================================"
+			echo "All done! Put this storage in your TV-Box and start it by pressing the power or reset button"
+			echo "============================================================================================"
+			;;
+		*)
+			echo "Process aborted"
+			exit 0
+			;;
+	esac
+}
+
+prep
+flash_storage
+exit 0
